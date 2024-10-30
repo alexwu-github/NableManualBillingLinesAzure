@@ -8,6 +8,20 @@
       "restart": true,
       "port": 9229,
       "preLaunchTask": "func: host start"
+    },
+    {
+      "type": "node",
+      "request": "launch",
+      "name": "Launch getNableBillingLines",
+      "skipFiles": ["<node_internals>/**"],
+      "program": "${workspaceFolder}\\src\\getNableBillingLines.js"
+    },
+    {
+      "type": "node",
+      "request": "launch",
+      "name": "Launch main",
+      "skipFiles": ["<node_internals>/**"],
+      "program": "${workspaceFolder}\\main.js"
     }
   ]
 }
