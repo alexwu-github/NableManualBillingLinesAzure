@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "start": "func start",
-    "start:dev": "node main.mjs",
+    "start:dev": "node main.js",
     "test": "echo \"No tests yet...\""
   },
   "dependencies": {

@@ -1,6 +1,5 @@
 'use strict';
-
-import { get } from '@azure/functions/types/app';
+import { getNableBillingLines } from './src/getNableBillingLines.js';
 
 // import { app } from '@azure/functions';
 
@@ -9,5 +8,7 @@ import { get } from '@azure/functions/types/app';
 // });
 
 export const main = async (context, myTimer) => {
-  getNableBillingLines();
+  getNableBillingLines(202409);
 };
+
+main();
