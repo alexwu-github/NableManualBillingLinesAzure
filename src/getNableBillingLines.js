@@ -16,7 +16,7 @@ import { getAccessToken } from './getCloudmoreToken.js';
 //1. Hämta alla fakturalinjer från Nable
 export const getNableBillingLines = async (billingDate) => {
   try {
-    const res = await axios.post(
+    const nableInvoicesRes = await axios.post(
       `https://prod-nableboomi.n-able.com:443/ws/rest/V2/Channel_UP_API/Invoices/${NABLE_DIST_ID}/${billingDate}`,
       {},
       {
@@ -26,13 +26,13 @@ export const getNableBillingLines = async (billingDate) => {
         },
       }
     );
-    const invoiceList = res.data[0];
+    const nableInvoices = nableInvoicesRes.data[0]?.Invoices;
 
     //2) Därefter loopar igenom alla fakturonummer och hämtar detaljer för varje faktura
-    //For loop invoiceId
-    for (const invoiceId of invoiceList.Invoices) {
+    for (const nableInvoice of nableInvoices) {
+      const nableInvoiceId = nableInvoice.InvoiceId;
       const detailRes = await axios.post(
-        `https://prod-nableboomi.n-able.com:443/ws/rest/V2/Channel_UP_API/InvoiceDetails/${NABLE_DIST_ID}/${invoiceId.InvoiceId}`,
+        `https://prod-nableboomi.n-able.com:443/ws/rest/V2/Channel_UP_API/InvoiceDetails/${NABLE_DIST_ID}/${nableInvoiceId}`,
         {},
         {
           headers: {
@@ -41,33 +41,66 @@ export const getNableBillingLines = async (billingDate) => {
           },
         }
       );
+      const nableInvoiceDetailsContracts = detailRes.data?.Contracts;
 
-      const invoiceDetails = detailRes.data;
       //Acessing the DistributorInternalSfdcAccountId and use the id for api call
-      for (const contract of invoiceDetails.Contracts) {
+      for (const contract of nableInvoiceDetailsContracts) {
         const resellerId = contract.DistributorInternalSfdcAccountId;
         const nableMspId = contract.ContractId;
         // console.log('this is Organization ID', clientId);
-        if (resellerId !== null) {
-          //new api call here!!!
-          const clientRes = await axios.post(
-            `https://prod-nableboomi.n-able.com:443/ws/rest/V2/Channel_UP_API/UsageDetailsDevices/${NABLE_DIST_ID}/${billingDate}/${nableMspId}`,
-            {},
-            {
-              headers: {
-                'x-api-key': `${NABLE_API_KEY}`,
-                'Content-Type': 'application/json',
-              },
-            }
-          );
-          const organizationClients = clientRes.data?.Clients;
-          console.log(organizationClients);
-          console.log(clientRes.data);
 
-          //Ny request mot cloudmore för att hämta alla organisationer för att matcha ClientId
-          const accessToken = await getAccessToken();
-          const getOrganization = await axios.get(
-            `${BASE_API_URL}/api/resellers/${resellerId}/organizations`,
+        // If no reseller id, skip to next contract
+        if (!resellerId) {
+          continue;
+        }
+
+        // Fetch clients for reseller to enable fetching client details
+        const nableClientRes = await axios.post(
+          `https://prod-nableboomi.n-able.com:443/ws/rest/V2/Channel_UP_API/UsageDetailsDevices/${NABLE_DIST_ID}/${billingDate}/${nableMspId}`,
+          {},
+          {
+            headers: {
+              'x-api-key': `${NABLE_API_KEY}`,
+              'Content-Type': 'application/json',
+            },
+          }
+        );
+        const nableOrganizationClientsContract = nableClientRes.data;
+        const nableBpAccountId = `${nableOrganizationClientsContract.BpAccountId}`;
+        const nableOrganizationClients =
+          nableOrganizationClientsContract?.Clients;
+
+        console.log(nableOrganizationClients);
+        console.log(nableClientRes.data);
+
+        // Store found nable subscription id that belongs to bp account id in invoice
+        let foundCommittedChargesNableSubId = null;
+
+        // Create map for easier lookup of nable organization clients
+        const clientMap = new Map();
+        for (const client of nableOrganizationClients) {
+          clientMap.set(client.ClientId.toString(), client);
+        }
+
+        // Fetch CL access token
+        const accessToken = await getAccessToken();
+
+        // Fetch CL organizations for reseller to enable fetching organization details
+        const clOrganizationRes = await axios.get(
+          `${BASE_API_URL}/api/resellers/${resellerId}/organizations`,
+          {
+            headers: {
+              'Content-Type': 'application/x-www-form-urlencoded',
+              Authorization: `Bearer ${accessToken}`,
+            },
+          }
+        );
+        const clOrganizations = clOrganizationRes.data;
+
+        // Loop through CL orgs to fetch details and process data
+        for (const clOrganization of clOrganizations) {
+          const clOrgDetailRes = await axios.get(
+            `${BASE_API_URL}/api/resellers/${resellerId}/Organizations/${clOrganization.id}`,
             {
               headers: {
                 'Content-Type': 'application/x-www-form-urlencoded',
@@ -75,78 +108,85 @@ export const getNableBillingLines = async (billingDate) => {
               },
             }
           );
-          //Loopar igenom alla orgar för att hämta custom properties
-          const organizations = getOrganization.data;
-          for (const organization of organizations) {
-            const resOrg = await axios.get(
-              `${BASE_API_URL}/api/resellers/${resellerId}/Organizations/${organization.id}`,
-              {
-                headers: {
-                  'Content-Type': 'application/x-www-form-urlencoded',
-                  Authorization: `Bearer ${accessToken}`,
-                },
-              }
-            );
-            const customProperties = resOrg.data.customProperties;
-            const nableSubId = customProperties.find(
-              (customProperty) =>
-                customProperty.name === 'Nable_subscription_id'
-            );
-            const nableClientId = customProperties.find(
-              (customProperty) => customProperty.name === 'Nable_Client_Id'
-            );
-            if (!!nableSubId && !!nableClientId) {
-              const clientMatch = clientRes.data.Clients.find(
-                (client) => client.ClientId.toString() === nableClientId.value
-              );
-              console.log('this is the client match', clientMatch);
-              console.log('this is the nableClientId', nableClientId);
-              console.log('this is the nableSubId', nableSubId);
-              if (clientMatch) {
-                //Uppdatera manualbilling för organisationen
-                for (const device of clientMatch.Devices) {
-                  for (const service of device.TotalByService) {
-                    const body = {
-                      // billingDate: new Date().toISOString(),
-                      billingDate: '2024-10-28',
-                      serviceId: NABLE_SERVICE_ID,
-                      subscriptionId: nableSubId.value,
-                      quantity: service.Quantity,
-                      costPrice: service.Price,
-                      salesPrice: service.Price,
-                      note: service.BillingServiceName,
-                    };
-                    console.log('this is the body', body);
-                    // const result = await axios.post(
-                    //   `${BASE_API_URL}/api/resellers/${resellerId}/organizations/${organization.id}/manualbilling`,
-                    //   body,
-                    //   {
-                    //     headers: {
-                    //       'Content-Type': 'application/json',
-                    //       Authorization: `Bearer ${accessToken}`,
-                    //     },
-                    //   }
-                    // );
-                    // console.log('this is the result', result);
-                    if (!!clientRes.data.CommittedCharges) {
-                      const body = {
-                        billingDate: '2024-10-28',
-                        serviceId: NABLE_SERVICE_ID,
-                        subscriptionId: nableSubId.value,
-                        quantity: clientRes.data.CommittedCharges.Quantity,
-                        costPrice: clientRes.data.CommittedCharges.Price,
-                        salesPrice:
-                          clientRes.data.CommittedCharges.service.Price,
-                        note: clientRes.data.CommittedCharges
-                          .BillingServiceName,
-                      };
-                      console.log('this is the body2', body);
-                    }
-                  }
-                }
+          const customProperties = clOrgDetailRes.data.customProperties;
+
+          // Find custom properties for nable subscription id, bp account id and client id
+          let nableSubId, clNableBpAccountId, nableClientId;
+          for (const customProperty of customProperties) {
+            switch (customProperty.name) {
+              case 'Nable_subscription_id':
+                nableSubId = customProperty.value;
+                break;
+              case 'Nable_BpAccountId':
+                clNableBpAccountId = customProperty.value;
+                break;
+              case 'Nable_Client_Id':
+                nableClientId = customProperty.value;
+                break;
+            }
+            if (nableSubId && clNableBpAccountId && nableClientId) {
+              break;
+            }
+          }
+
+          // If nable subscription id and bp account id match
+          if (
+            clNableBpAccountId &&
+            nableBpAccountId &&
+            clNableBpAccountId === nableBpAccountId
+          ) {
+            foundCommittedChargesNableSubId = nableSubId;
+          }
+
+          // If no nable subscription id or client id, skip to next organization
+          if (!nableClientId || !nableSubId) {
+            continue;
+          }
+
+          const clientMatch = clientMap.get(nableClientId);
+
+          console.log('this is the client match', clientMatch);
+          console.log('this is the nableClientId', nableClientId);
+          console.log('this is the nableSubId', nableSubId);
+
+          if (clientMatch) {
+            //Uppdatera manualbilling för organisationen
+            for (const device of clientMatch.Devices) {
+              for (const service of device.TotalByService) {
+                const body = {
+                  // billingDate: new Date().toISOString(),
+                  billingDate: '2024-11-04',
+                  serviceId: NABLE_SERVICE_ID,
+                  subscriptionId: nableSubId,
+                  quantity: service.Quantity,
+                  costPrice: service.Price,
+                  salesPrice: service.Price,
+                  note: service.BillingServiceName,
+                };
+                console.log('this is the body', body);
+
+                // await manualBillingLines(resellerId, clOrganization.id, body);
               }
             }
           }
+        }
+
+        if (!foundCommittedChargesNableSubId) {
+          continue;
+        }
+        for (const committedCharge of nableOrganizationClientsContract.CommittedCharges) {
+          const body = {
+            billingDate: '2024-11-04',
+            serviceId: NABLE_SERVICE_ID,
+            subscriptionId: foundCommittedChargesNableSubId,
+            quantity: committedCharge.Quantity,
+            costPrice: committedCharge.Price,
+            salesPrice: committedCharge.Price,
+            note: committedCharge.BillingServiceName,
+          };
+          console.log('this is the committedCharge body', body);
+
+          // await manualBillingLines(resellerId, clOrganization.id, body);
         }
       }
     }
@@ -154,4 +194,20 @@ export const getNableBillingLines = async (billingDate) => {
     console.log('Error in getNableBillingLines:', error);
   }
 };
-getNableBillingLines(202409);
+
+const manualBillingLines = async (resellerId, organizationId, body) => {
+  const accessToken = await getAccessToken();
+  const result = await axios.post(
+    `${BASE_API_URL}/api/resellers/${resellerId}/organizations/${organizationId}/manualbilling`,
+    body,
+    {
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${accessToken}`,
+      },
+    }
+  );
+  console.log('this is the result', result);
+};
+
+getNableBillingLines(202410);
